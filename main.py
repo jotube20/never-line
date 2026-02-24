@@ -106,7 +106,7 @@ class TargetView(discord.ui.View):
     @discord.ui.button(label="ورن (Wr)", style=discord.ButtonStyle.danger)
     async def btn_wr(self, i: discord.Interaction, b: discord.ui.Button): await self.save_target(i, "ورن")
 
-    # زر التراجع الجديد
+    # زر التراجع 
     @discord.ui.button(label="تراجع ❌", style=discord.ButtonStyle.secondary)
     async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.author_id:
@@ -121,7 +121,7 @@ class TargetView(discord.ui.View):
             await original_msg.delete()
         except: pass
 
-# 3. قائمة المساعدة المنسدلة (بدون Team و Giveaway)
+# 3. قائمة المساعدة المنسدلة 
 class HelpSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -137,19 +137,20 @@ class HelpSelect(discord.ui.Select):
         if self.values[0] == "owners":
             embed.title = "Owners Commands"
             embed.description = "أوامر الإدارة العليا."
-            embed.add_field(name="!setroom", value="تحديد الروم المخصصة لإداري لرفع التارجت.", inline=False)
-            embed.add_field(name="!reset", value="تصفير التارجت لجميع الإداريين (بداية أسبوع جديد).", inline=False)
+            embed.add_field(name="!setroom", value="**الاستخدام:** `!setroom @user #channel`\nتحديد الروم المخصصة لإداري لرفع التارجت.", inline=False)
+            embed.add_field(name="!reset", value="**الاستخدام:** `!reset`\nتصفير التارجت لجميع الإداريين (بداية أسبوع جديد).", inline=False)
+            embed.add_field(name="!minus", value="**الاستخدام:** `!minus @user نوع_التارجت العدد`\nخصم تارجت من إداري معين (مثال: `!minus @user دعم 1`).", inline=False)
             
         elif self.values[0] == "staff":
             embed.title = "Staff Commands"
             embed.description = "أوامر الإستاف لمتابعة العمل."
-            embed.add_field(name="!target", value="عرض إحصائيات التارجت.", inline=False)
+            embed.add_field(name="!target", value="**الاستخدام:** `!target` أو `!target @user`\nعرض إحصائيات التارجت.", inline=False)
             
         elif self.values[0] == "public":
             embed.title = "Public Commands"
             embed.description = "الأوامر العامة."
-            embed.add_field(name="!ping", value="معرفة سرعة استجابة البوت.", inline=False)
-            embed.add_field(name="خط", value="إرسال الفاصل الزمني.", inline=False)
+            embed.add_field(name="!ping", value="**الاستخدام:** `!ping`\nمعرفة سرعة استجابة البوت.", inline=False)
+            embed.add_field(name="خط", value="**الاستخدام:** إرسال كلمة `خط` أو `line`\nإرسال الفاصل الزمني.", inline=False)
 
         embed.set_image(url=LINE_URL)
         await interaction.response.edit_message(embed=embed)
@@ -221,11 +222,38 @@ async def reset(ctx):
     view = ResetView()
     await ctx.send("⚠️ **تنبيه إداري:** هل أنت متأكد من رغبتك في تصفير التارجت لجميع الإداريين؟", view=view)
 
+# أمر الخصم الجديد
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def minus(ctx, member: discord.Member, target_type: str, amount: int = 1):
+    valid_types = ["دعم", "تقديم", "ورن"]
+    if target_type not in valid_types:
+        await ctx.send("❌ نوع التارجت غير صحيح! (اختر: دعم، تقديم، ورن)")
+        return
+
+    # مسح أحدث التارجتات للإداري ده بالعدد المطلوب
+    c.execute('''
+        DELETE FROM targets 
+        WHERE msg_id IN (
+            SELECT msg_id FROM targets 
+            WHERE user_id = ? AND target_type = ? 
+            ORDER BY msg_id DESC LIMIT ?
+        )
+    ''', (member.id, target_type, amount))
+    
+    deleted_count = c.rowcount
+    conn.commit()
+    
+    if deleted_count == 0:
+        await ctx.send(f"⚠️ الإداري {member.display_name} معندوش أي تارجت من نوع **{target_type}** عشان يتخصم!")
+    else:
+        embed = discord.Embed(description=f"✅ تم خصم **{deleted_count}** من تارجت **{target_type}** للإداري {member.mention} بنجاح.", color=0xe74c3c)
+        await ctx.send(embed=embed)
+
 @bot.command()
 async def target(ctx, member: discord.Member = None):
     user = member or ctx.author
     
-    # 1. فحص هل الشخص مسجل في قاعدة البيانات أصلاً؟
     c.execute('SELECT channel_id FROM rooms WHERE user_id = ?', (user.id,))
     is_registered = c.fetchone()
     
@@ -233,7 +261,6 @@ async def target(ctx, member: discord.Member = None):
         await ctx.send("عفواً، هذا الشخص لا يوجد في قاعدة بيانات الإداريين المسجلين.")
         return
 
-    # 2. لو مسجل، نجيب إحصائياته
     c.execute('SELECT target_type, COUNT(*) FROM targets WHERE user_id = ? GROUP BY target_type', (user.id,))
     results = c.fetchall()
     
@@ -242,7 +269,6 @@ async def target(ctx, member: discord.Member = None):
         stats[row[0]] = row[1]
     total = sum(stats.values())
     
-    # 3. بناء الإيمبد الشيك والعداد
     reset_time = get_reset_timestamp()
     
     embed = discord.Embed(title="📊 إحصائيات التارجت الأسبوعي", color=EMBED_COLOR)
@@ -254,7 +280,6 @@ async def target(ctx, member: discord.Member = None):
     embed.add_field(name="📝 تقديم (Ap)", value=f"`{stats['تقديم']}`", inline=True)
     embed.add_field(name="⚠️ ورن (Wr)", value=f"`{stats['ورن']}`", inline=True)
     
-    # خط فاصل بسيط
     embed.add_field(name="⠀", value="━━━━━━━━━━━━━━━━━━━━", inline=False)
     embed.add_field(name="🏆 الإجمالي", value=f"**{total}**", inline=False)
     
@@ -270,4 +295,3 @@ async def ping(ctx):
 keep_alive()
 token = os.getenv('DISCORD_TOKEN')
 bot.run(token)
-
