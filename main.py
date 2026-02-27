@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from discord.ext import commands
 from flask import Flask
 from threading import Thread
+from typing import Literal # دي ضفناها عشان اختيارات السلاش كوماند
 
 # ==========================================
 #              إعدادات قاعدة البيانات (MongoDB)
@@ -15,9 +16,8 @@ if not MONGO_URI:
     print("⚠️ تحذير: لم يتم العثور على رابط MongoDB في الإعدادات!")
 
 cluster = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
-db = cluster["NeverManagement"] # اسم الداتا بيز
+db = cluster["NeverManagement"] 
 
-# المجموعات (Collections) بديلة الجداول
 targets_col = db["targets"]
 rooms_col = db["rooms"]
 pending_col = db["pending"]
@@ -26,11 +26,10 @@ owners_col = db["bot_owners"]
 # ==========================================
 #              إعدادات السيرفر والآيديهات
 # ==========================================
-MAIN_OWNER_ID = 892133353757736960 # الأونر الأساسي الدائم
+MAIN_OWNER_ID = 892133353757736960 
 STAFF_CATEGORY_ID = 1474909829540872405
 OWNER_CATEGORY_ID = 1474909829259726871
 
-# رومات استقبال المراجعات
 STAFF_LOG_ID = 1475818693832212591
 OWNER_LOG_ID = 1475818413640126476
 
@@ -74,17 +73,15 @@ async def get_target_number(user_id, t_type):
     count = await targets_col.count_documents({"user_id": user_id, "target_type": t_type})
     return count + 1
 
-# دالة حماية الأوامر
 def is_bot_owner():
     async def predicate(ctx):
         if ctx.author.id == MAIN_OWNER_ID: return True
         owner = await owners_col.find_one({"user_id": ctx.author.id})
         if owner: return True
-        await ctx.send("❌ معندكش صلاحية تتحكم في البوت (مخصصة لأونرات البوت فقط).")
+        await ctx.send("❌ معندكش صلاحية تتحكم في البوت (مخصصة لأونرات البوت فقط).", ephemeral=True)
         return False
     return commands.check(predicate)
 
-# دالة حماية الأزرار
 async def check_button_owner(interaction: discord.Interaction):
     if interaction.user.id == MAIN_OWNER_ID: return True
     owner = await owners_col.find_one({"user_id": interaction.user.id})
@@ -96,7 +93,6 @@ async def check_button_owner(interaction: discord.Interaction):
 #              واجهات المستخدم (UI)
 # ==========================================
 
-# --- 1. نافذة الرفض (Modal) ---
 class RejectModal(discord.ui.Modal, title='سبب الرفض'):
     reason = discord.ui.TextInput(label='اكتب سبب الرفض هنا:', style=discord.TextStyle.long, required=True)
 
@@ -128,7 +124,6 @@ class RejectModal(discord.ui.Modal, title='سبب الرفض'):
         
         await interaction.response.send_message("تم الرفض وإرسال السبب في الخاص بنجاح.", ephemeral=True)
 
-# --- 2. أزرار المراجعة للإدارة العليا ---
 class ReviewView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -142,7 +137,6 @@ class ReviewView(discord.ui.View):
             await interaction.response.send_message("❌ التارجت ده مش موجود في قائمة الانتظار!", ephemeral=True)
             return
         
-        # التأكد إنه متراجعش قبل كده
         existing = await targets_col.find_one({"msg_id": interaction.message.id})
         if existing:
             await interaction.response.send_message("⚠️ تم مراجعة هذا التارجت مسبقاً!", ephemeral=True)
@@ -151,7 +145,6 @@ class ReviewView(discord.ui.View):
         author_id = row["author_id"]
         t_type = row["target_type"]
         
-        # حفظ التارجت ومسحه من الانتظار
         await targets_col.insert_one({"msg_id": interaction.message.id, "user_id": author_id, "target_type": t_type})
         await pending_col.delete_one({"msg_id": interaction.message.id})
 
@@ -181,7 +174,6 @@ class ReviewView(discord.ui.View):
         embed = interaction.message.embeds[0]
         await interaction.response.send_modal(RejectModal(interaction.message.id, row["author_id"], row["target_type"], row["image_url"], embed))
 
-# --- 3. أزرار إرسال التارجت للإداري ---
 class TargetSubmitView(discord.ui.View):
     def __init__(self, author_id, img_url):
         super().__init__(timeout=None)
@@ -247,7 +239,6 @@ class TargetSubmitView(discord.ui.View):
             return
         await interaction.message.delete()
 
-# --- 4. أزرار تأكيد تصفير التارجت ---
 class ResetView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -260,7 +251,6 @@ class ResetView(discord.ui.View):
         for item in self.children: item.disabled = True
         await interaction.response.edit_message(content="✅ **تم تصفير التارجت لجميع الإداريين بنجاح، وبدأ أسبوع جديد!**", view=None)
 
-# --- 5. قائمة المساعدة ---
 class HelpSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -275,21 +265,22 @@ class HelpSelect(discord.ui.Select):
         if self.values[0] == "owners":
             embed.title = "Owners Commands"
             embed.description = "أوامر الإدارة العليا (الأونرات)."
-            embed.add_field(name="!addowner", value="إضافة أونر للبوت.", inline=True)
-            embed.add_field(name="!removeowner", value="إزالة أونر من البوت.", inline=True)
-            embed.add_field(name="!setroom", value="تحديد روم التارجت لإداري.", inline=True)
-            embed.add_field(name="!unsetroom", value="مسح روم التارجت لإداري.", inline=True)
-            embed.add_field(name="!minus", value="خصم تارجت من إداري.", inline=True)
-            embed.add_field(name="!reset", value="تصفير التارجت للجميع.", inline=True)
+            embed.add_field(name="/addowner", value="إضافة أونر للبوت.", inline=True)
+            embed.add_field(name="/removeowner", value="إزالة أونر من البوت.", inline=True)
+            embed.add_field(name="/setroom", value="تحديد روم التارجت لإداري.", inline=True)
+            embed.add_field(name="/unsetroom", value="مسح روم التارجت لإداري.", inline=True)
+            embed.add_field(name="/minus", value="خصم تارجت من إداري.", inline=True)
+            embed.add_field(name="/reset", value="تصفير التارجت للجميع.", inline=True)
+            embed.add_field(name="!sync", value="تحديث السلاش كوماندز (أمر عادي فقط).", inline=True)
         elif self.values[0] == "staff":
             embed.title = "Staff Commands"
             embed.description = "أوامر الإستاف لمتابعة العمل."
-            embed.add_field(name="!target", value="عرض إحصائيات التارجت.", inline=False)
+            embed.add_field(name="/target", value="عرض إحصائيات التارجت.", inline=False)
         elif self.values[0] == "public":
             embed.title = "Public Commands"
             embed.description = "الأوامر العامة."
-            embed.add_field(name="!ping", value="معرفة سرعة استجابة البوت.", inline=False)
-            embed.add_field(name="خط", value="إرسال الفاصل الزمني.", inline=False)
+            embed.add_field(name="/ping", value="معرفة سرعة استجابة البوت.", inline=False)
+            embed.add_field(name="خط", value="إرسال الفاصل الزمني (كلمة في الشات).", inline=False)
 
         embed.set_image(url=LINE_URL)
         await interaction.response.edit_message(embed=embed)
@@ -335,85 +326,84 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ==========================================
-#               الأوامر (Commands)
+#               الأوامر (Commands & Hybrid)
 # ==========================================
 
+# أمر المزامنة (ده أمر عادي !sync بس عشان تحديث السلاش كوماندز لديسكورد)
 @bot.command()
-async def help(ctx):
+@is_bot_owner()
+async def sync(ctx):
+    await bot.tree.sync()
+    await ctx.send("✅ تم مزامنة أوامر السلاش (Slash Commands) مع ديسكورد بنجاح! ممكن تاخد دقيقة وتظهر للكل.")
+
+@bot.hybrid_command(name="help", description="عرض قائمة أوامر البوت")
+async def help_cmd(ctx):
     embed = discord.Embed(color=EMBED_COLOR)
     embed.description = f"Hey: {ctx.author.mention} 👋\n\nI'm: {bot.user.mention}, a custom System bot built specially for the server.\n\nTo get started using this bot, select a category from `Select command category...` 🔽"
     if bot.user.avatar: embed.set_thumbnail(url=bot.user.avatar.url)
     embed.set_image(url=LINE_URL)
     await ctx.send(embed=embed, view=HelpView())
 
-# --- أوامر نظام الأونرات ---
-@bot.command()
+@bot.hybrid_command(name="addowner", description="إضافة أونر للتحكم في البوت")
 @is_bot_owner()
-async def addowner(ctx, user: discord.User):
+async def addowner(ctx, user: discord.Member):
     existing = await owners_col.find_one({"user_id": user.id})
     if existing:
-        await ctx.send("⚠️ الشخص ده أونر بالفعل!")
+        await ctx.send("⚠️ الشخص ده أونر بالفعل!", ephemeral=True)
     else:
         await owners_col.insert_one({"user_id": user.id})
         await ctx.send(embed=discord.Embed(description=f"✅ تم إضافة الأونر بنجاح: {user.mention}", color=0x2ecc71))
 
-@bot.command()
+@bot.hybrid_command(name="removeowner", description="إزالة أونر من البوت")
 @is_bot_owner()
-async def removeowner(ctx, user: discord.User):
+async def removeowner(ctx, user: discord.Member):
     if user.id == MAIN_OWNER_ID:
-        await ctx.send("❌ مقدرش أشيل الأونر الأساسي!")
+        await ctx.send("❌ مقدرش أشيل الأونر الأساسي!", ephemeral=True)
         return
     result = await owners_col.delete_one({"user_id": user.id})
     if result.deleted_count > 0:
         await ctx.send(embed=discord.Embed(description=f"✅ تم إزالة الأونر بنجاح: {user.mention}", color=0xe74c3c))
     else:
-        await ctx.send("⚠️ الشخص ده مش متسجل كأونر أصلاً!")
+        await ctx.send("⚠️ الشخص ده مش متسجل كأونر أصلاً!", ephemeral=True)
 
-# --- أوامر التحكم في الرومات والتارجت ---
-@bot.command()
+@bot.hybrid_command(name="setroom", description="تحديد روم رفع التارجت لإداري معين")
 @is_bot_owner()
 async def setroom(ctx, member: discord.Member, channel: discord.TextChannel):
     await rooms_col.update_one({"user_id": member.id}, {"$set": {"channel_id": channel.id}}, upsert=True)
     await ctx.send(embed=discord.Embed(description=f"✅ تم تخصيص الروم {channel.mention} للإداري {member.mention}.", color=0x2ecc71))
 
-@bot.command()
+@bot.hybrid_command(name="unsetroom", description="مسح روم التارجت المخصصة لإداري")
 @is_bot_owner()
 async def unsetroom(ctx, member: discord.Member):
     await rooms_col.delete_one({"user_id": member.id})
     await ctx.send(embed=discord.Embed(description=f"✅ تم مسح روم التارجت المخصصة للإداري {member.mention}.", color=0xe74c3c))
 
-@bot.command()
+@bot.hybrid_command(name="reset", description="تصفير التارجت لجميع الإداريين (بداية أسبوع جديد)")
 @is_bot_owner()
 async def reset(ctx):
     await ctx.send("⚠️ **تنبيه إداري:** هل أنت متأكد من رغبتك في تصفير التارجت لجميع الإداريين؟", view=ResetView())
 
-@bot.command()
+@bot.hybrid_command(name="minus", description="خصم تارجت من إداري معين")
 @is_bot_owner()
-async def minus(ctx, member: discord.Member, target_type: str, amount: int = 1):
-    valid_types = ["دعم", "تقديم", "ورن"]
-    if target_type not in valid_types:
-        await ctx.send("❌ نوع التارجت غير صحيح! (اختر: دعم، تقديم، ورن)")
-        return
-        
+async def minus(ctx, member: discord.Member, target_type: Literal["دعم", "تقديم", "ورن"], amount: int = 1):
     cursor = targets_col.find({"user_id": member.id, "target_type": target_type}).sort("_id", -1).limit(amount)
     docs = await cursor.to_list(length=amount)
     
     if not docs: 
-        await ctx.send(f"⚠️ الإداري {member.display_name} معندوش تارجت من نوع **{target_type}** عشان يتخصم!")
+        await ctx.send(f"⚠️ الإداري {member.display_name} معندوش تارجت من نوع **{target_type}** عشان يتخصم!", ephemeral=True)
     else: 
         msg_ids = [doc["msg_id"] for doc in docs]
         await targets_col.delete_many({"msg_id": {"$in": msg_ids}})
         await ctx.send(embed=discord.Embed(description=f"✅ تم خصم **{len(docs)}** من تارجت **{target_type}** للإداري {member.mention}.", color=0xe74c3c))
 
-@bot.command()
+@bot.hybrid_command(name="target", description="عرض إحصائيات التارجت الأسبوعي")
 async def target(ctx, member: discord.Member = None):
     user = member or ctx.author
     room = await rooms_col.find_one({"user_id": user.id})
     if not room:
-        await ctx.send("عفواً، هذا الشخص لا يوجد في قاعدة بيانات الإداريين المسجلين.")
+        await ctx.send("عفواً، هذا الشخص لا يوجد في قاعدة بيانات الإداريين المسجلين.", ephemeral=True)
         return
 
-    # حساب الإحصائيات من MongoDB
     pipeline = [
         {"$match": {"user_id": user.id}},
         {"$group": {"_id": "$target_type", "count": {"$sum": 1}}}
@@ -439,7 +429,7 @@ async def target(ctx, member: discord.Member = None):
     embed.set_image(url=LINE_URL)
     await ctx.send(embed=embed)
 
-@bot.command()
+@bot.hybrid_command(name="ping", description="معرفة سرعة استجابة البوت")
 async def ping(ctx):
     await ctx.send(embed=discord.Embed(description=f"🏓 Pong! **{round(bot.latency * 1000)}ms**", color=EMBED_COLOR))
 
