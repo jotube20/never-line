@@ -1,23 +1,27 @@
 import discord
 import os
-import sqlite3
 import pytz
+import motor.motor_asyncio
 from datetime import datetime, timedelta
 from discord.ext import commands
 from flask import Flask
 from threading import Thread
 
 # ==========================================
-#              إعدادات قاعدة البيانات
+#              إعدادات قاعدة البيانات (MongoDB)
 # ==========================================
-conn = sqlite3.connect('targets.db', check_same_thread=False)
-c = conn.cursor()
-c.execute('CREATE TABLE IF NOT EXISTS targets (msg_id INTEGER PRIMARY KEY, user_id INTEGER, target_type TEXT)')
-c.execute('CREATE TABLE IF NOT EXISTS rooms (user_id INTEGER PRIMARY KEY, channel_id INTEGER)')
-c.execute('CREATE TABLE IF NOT EXISTS pending (msg_id INTEGER PRIMARY KEY, author_id INTEGER, target_type TEXT, target_num INTEGER, image_url TEXT)')
-# جدول جديد لحفظ أونرات البوت
-c.execute('CREATE TABLE IF NOT EXISTS bot_owners (user_id INTEGER PRIMARY KEY)')
-conn.commit()
+MONGO_URI = os.getenv('MONGO_URI')
+if not MONGO_URI:
+    print("⚠️ تحذير: لم يتم العثور على رابط MongoDB في الإعدادات!")
+
+cluster = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
+db = cluster["NeverManagement"] # اسم الداتا بيز
+
+# المجموعات (Collections) بديلة الجداول
+targets_col = db["targets"]
+rooms_col = db["rooms"]
+pending_col = db["pending"]
+owners_col = db["bot_owners"]
 
 # ==========================================
 #              إعدادات السيرفر والآيديهات
@@ -43,7 +47,7 @@ def run(): app.run(host='0.0.0.0', port=8080)
 def keep_alive(): Thread(target=run).start()
 
 # ==========================================
-#              تهيئة البوت (Persistent Views)
+#              تهيئة البوت
 # ==========================================
 class MyBot(commands.Bot):
     async def setup_hook(self):
@@ -66,25 +70,25 @@ def get_reset_timestamp():
     next_friday = next_friday.replace(hour=18, minute=0, second=0, microsecond=0)
     return int(next_friday.timestamp())
 
-def get_target_number(user_id, t_type):
-    c.execute('SELECT COUNT(*) FROM targets WHERE user_id = ? AND target_type = ?', (user_id, t_type))
-    return c.fetchone()[0] + 1
+async def get_target_number(user_id, t_type):
+    count = await targets_col.count_documents({"user_id": user_id, "target_type": t_type})
+    return count + 1
 
-# دالة حماية الأوامر (مخصصة للأونرات فقط)
+# دالة حماية الأوامر
 def is_bot_owner():
     async def predicate(ctx):
         if ctx.author.id == MAIN_OWNER_ID: return True
-        c.execute('SELECT user_id FROM bot_owners WHERE user_id = ?', (ctx.author.id,))
-        if c.fetchone(): return True
+        owner = await owners_col.find_one({"user_id": ctx.author.id})
+        if owner: return True
         await ctx.send("❌ معندكش صلاحية تتحكم في البوت (مخصصة لأونرات البوت فقط).")
         return False
     return commands.check(predicate)
 
-# دالة حماية الأزرار (للأونرات فقط)
+# دالة حماية الأزرار
 async def check_button_owner(interaction: discord.Interaction):
     if interaction.user.id == MAIN_OWNER_ID: return True
-    c.execute('SELECT user_id FROM bot_owners WHERE user_id = ?', (interaction.user.id,))
-    if c.fetchone(): return True
+    owner = await owners_col.find_one({"user_id": interaction.user.id})
+    if owner: return True
     await interaction.response.send_message("❌ معندكش صلاحية لاستخدام الزرار ده!", ephemeral=True)
     return False
 
@@ -105,8 +109,7 @@ class RejectModal(discord.ui.Modal, title='سبب الرفض'):
         self.review_embed = embed
 
     async def on_submit(self, interaction: discord.Interaction):
-        c.execute('DELETE FROM pending WHERE msg_id = ?', (self.msg_id,))
-        conn.commit()
+        await pending_col.delete_one({"msg_id": self.msg_id})
         
         self.review_embed.color = 0xe74c3c
         self.review_embed.title = "❌ تم رفض التارجت"
@@ -134,20 +137,23 @@ class ReviewView(discord.ui.View):
     async def btn_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_button_owner(interaction): return
 
-        c.execute('SELECT author_id, target_type, target_num, image_url FROM pending WHERE msg_id = ?', (interaction.message.id,))
-        row = c.fetchone()
+        row = await pending_col.find_one({"msg_id": interaction.message.id})
         if not row:
             await interaction.response.send_message("❌ التارجت ده مش موجود في قائمة الانتظار!", ephemeral=True)
             return
         
-        author_id, t_type, t_num, img_url = row
-        try:
-            c.execute('INSERT INTO targets (msg_id, user_id, target_type) VALUES (?, ?, ?)', (interaction.message.id, author_id, t_type))
-            c.execute('DELETE FROM pending WHERE msg_id = ?', (interaction.message.id,))
-            conn.commit()
-        except sqlite3.IntegrityError:
+        # التأكد إنه متراجعش قبل كده
+        existing = await targets_col.find_one({"msg_id": interaction.message.id})
+        if existing:
             await interaction.response.send_message("⚠️ تم مراجعة هذا التارجت مسبقاً!", ephemeral=True)
             return
+
+        author_id = row["author_id"]
+        t_type = row["target_type"]
+        
+        # حفظ التارجت ومسحه من الانتظار
+        await targets_col.insert_one({"msg_id": interaction.message.id, "user_id": author_id, "target_type": t_type})
+        await pending_col.delete_one({"msg_id": interaction.message.id})
 
         embed = interaction.message.embeds[0]
         embed.color = 0x2ecc71
@@ -167,15 +173,13 @@ class ReviewView(discord.ui.View):
     async def btn_reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_button_owner(interaction): return
 
-        c.execute('SELECT author_id, target_type, target_num, image_url FROM pending WHERE msg_id = ?', (interaction.message.id,))
-        row = c.fetchone()
+        row = await pending_col.find_one({"msg_id": interaction.message.id})
         if not row:
             await interaction.response.send_message("❌ التارجت ده مش موجود في قائمة الانتظار!", ephemeral=True)
             return
         
-        author_id, t_type, t_num, img_url = row
         embed = interaction.message.embeds[0]
-        await interaction.response.send_modal(RejectModal(interaction.message.id, author_id, t_type, img_url, embed))
+        await interaction.response.send_modal(RejectModal(interaction.message.id, row["author_id"], row["target_type"], row["image_url"], embed))
 
 # --- 3. أزرار إرسال التارجت للإداري ---
 class TargetSubmitView(discord.ui.View):
@@ -201,7 +205,7 @@ class TargetSubmitView(discord.ui.View):
             await interaction.response.send_message("❌ روم المراجعة غير موجودة!", ephemeral=True)
             return
 
-        t_num = get_target_number(self.author_id, target_type)
+        t_num = await get_target_number(self.author_id, target_type)
         prefix = "Su" if target_type == "دعم" else "Ap" if target_type == "تقديم" else "Wr"
 
         embed = discord.Embed(title="مراجعة تارجت جديد 🔎", color=0xf1c40f)
@@ -212,11 +216,14 @@ class TargetSubmitView(discord.ui.View):
 
         msg = await log_channel.send(embed=embed, view=ReviewView())
 
-        c.execute('INSERT INTO pending (msg_id, author_id, target_type, target_num, image_url) VALUES (?, ?, ?, ?, ?)',
-                  (msg.id, self.author_id, target_type, t_num, self.img_url))
-        conn.commit()
+        await pending_col.insert_one({
+            "msg_id": msg.id, 
+            "author_id": self.author_id, 
+            "target_type": target_type, 
+            "target_num": t_num, 
+            "image_url": self.img_url
+        })
 
-        # إرسال الخط الفاصل في روم المراجعة عشان التنظيم
         line_embed = discord.Embed(color=EMBED_COLOR)
         line_embed.set_image(url=LINE_URL)
         await log_channel.send(embed=line_embed)
@@ -248,12 +255,12 @@ class ResetView(discord.ui.View):
     @discord.ui.button(label="تصفير تارجت الجميع 🗑️", style=discord.ButtonStyle.danger)
     async def confirm_reset(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await check_button_owner(interaction): return
-        c.execute('DELETE FROM targets')
-        conn.commit()
+        
+        await targets_col.delete_many({})
         for item in self.children: item.disabled = True
         await interaction.response.edit_message(content="✅ **تم تصفير التارجت لجميع الإداريين بنجاح، وبدأ أسبوع جديد!**", view=None)
 
-# --- 5. قائمة المساعدة المنسدلة ---
+# --- 5. قائمة المساعدة ---
 class HelpSelect(discord.ui.Select):
     def __init__(self):
         options = [
@@ -299,6 +306,7 @@ class HelpView(discord.ui.View):
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
+    print("MongoDB Connected Successfully!")
 
 @bot.event
 async def on_message(message):
@@ -313,11 +321,9 @@ async def on_message(message):
         except: pass
 
     if message.attachments:
-        c.execute('SELECT user_id FROM rooms WHERE channel_id = ?', (message.channel.id,))
-        channel_owner = c.fetchone()
-        
-        if channel_owner:
-            if channel_owner[0] != message.author.id:
+        room = await rooms_col.find_one({"channel_id": message.channel.id})
+        if room:
+            if room["user_id"] != message.author.id:
                 await message.delete()
                 await message.channel.send(f"{message.author.mention} ❌ دي مش روم التارجت بتاعتك!", delete_after=5)
                 return
@@ -344,12 +350,12 @@ async def help(ctx):
 @bot.command()
 @is_bot_owner()
 async def addowner(ctx, user: discord.User):
-    try:
-        c.execute('INSERT INTO bot_owners (user_id) VALUES (?)', (user.id,))
-        conn.commit()
-        await ctx.send(embed=discord.Embed(description=f"✅ تم إضافة الأونر بنجاح: {user.mention}", color=0x2ecc71))
-    except sqlite3.IntegrityError:
+    existing = await owners_col.find_one({"user_id": user.id})
+    if existing:
         await ctx.send("⚠️ الشخص ده أونر بالفعل!")
+    else:
+        await owners_col.insert_one({"user_id": user.id})
+        await ctx.send(embed=discord.Embed(description=f"✅ تم إضافة الأونر بنجاح: {user.mention}", color=0x2ecc71))
 
 @bot.command()
 @is_bot_owner()
@@ -357,9 +363,8 @@ async def removeowner(ctx, user: discord.User):
     if user.id == MAIN_OWNER_ID:
         await ctx.send("❌ مقدرش أشيل الأونر الأساسي!")
         return
-    c.execute('DELETE FROM bot_owners WHERE user_id = ?', (user.id,))
-    if c.rowcount > 0:
-        conn.commit()
+    result = await owners_col.delete_one({"user_id": user.id})
+    if result.deleted_count > 0:
         await ctx.send(embed=discord.Embed(description=f"✅ تم إزالة الأونر بنجاح: {user.mention}", color=0xe74c3c))
     else:
         await ctx.send("⚠️ الشخص ده مش متسجل كأونر أصلاً!")
@@ -368,15 +373,13 @@ async def removeowner(ctx, user: discord.User):
 @bot.command()
 @is_bot_owner()
 async def setroom(ctx, member: discord.Member, channel: discord.TextChannel):
-    c.execute('REPLACE INTO rooms (user_id, channel_id) VALUES (?, ?)', (member.id, channel.id))
-    conn.commit()
+    await rooms_col.update_one({"user_id": member.id}, {"$set": {"channel_id": channel.id}}, upsert=True)
     await ctx.send(embed=discord.Embed(description=f"✅ تم تخصيص الروم {channel.mention} للإداري {member.mention}.", color=0x2ecc71))
 
 @bot.command()
 @is_bot_owner()
 async def unsetroom(ctx, member: discord.Member):
-    c.execute('DELETE FROM rooms WHERE user_id = ?', (member.id,))
-    conn.commit()
+    await rooms_col.delete_one({"user_id": member.id})
     await ctx.send(embed=discord.Embed(description=f"✅ تم مسح روم التارجت المخصصة للإداري {member.mention}.", color=0xe74c3c))
 
 @bot.command()
@@ -391,28 +394,37 @@ async def minus(ctx, member: discord.Member, target_type: str, amount: int = 1):
     if target_type not in valid_types:
         await ctx.send("❌ نوع التارجت غير صحيح! (اختر: دعم، تقديم، ورن)")
         return
-    c.execute('''
-        DELETE FROM targets WHERE msg_id IN (
-            SELECT msg_id FROM targets WHERE user_id = ? AND target_type = ? ORDER BY msg_id DESC LIMIT ?
-        )
-    ''', (member.id, target_type, amount))
-    deleted_count = c.rowcount
-    conn.commit()
+        
+    cursor = targets_col.find({"user_id": member.id, "target_type": target_type}).sort("_id", -1).limit(amount)
+    docs = await cursor.to_list(length=amount)
     
-    if deleted_count == 0: await ctx.send(f"⚠️ الإداري {member.display_name} معندوش تارجت من نوع **{target_type}** عشان يتخصم!")
-    else: await ctx.send(embed=discord.Embed(description=f"✅ تم خصم **{deleted_count}** من تارجت **{target_type}** للإداري {member.mention}.", color=0xe74c3c))
+    if not docs: 
+        await ctx.send(f"⚠️ الإداري {member.display_name} معندوش تارجت من نوع **{target_type}** عشان يتخصم!")
+    else: 
+        msg_ids = [doc["msg_id"] for doc in docs]
+        await targets_col.delete_many({"msg_id": {"$in": msg_ids}})
+        await ctx.send(embed=discord.Embed(description=f"✅ تم خصم **{len(docs)}** من تارجت **{target_type}** للإداري {member.mention}.", color=0xe74c3c))
 
 @bot.command()
 async def target(ctx, member: discord.Member = None):
     user = member or ctx.author
-    c.execute('SELECT channel_id FROM rooms WHERE user_id = ?', (user.id,))
-    if not c.fetchone():
+    room = await rooms_col.find_one({"user_id": user.id})
+    if not room:
         await ctx.send("عفواً، هذا الشخص لا يوجد في قاعدة بيانات الإداريين المسجلين.")
         return
 
-    c.execute('SELECT target_type, COUNT(*) FROM targets WHERE user_id = ? GROUP BY target_type', (user.id,))
+    # حساب الإحصائيات من MongoDB
+    pipeline = [
+        {"$match": {"user_id": user.id}},
+        {"$group": {"_id": "$target_type", "count": {"$sum": 1}}}
+    ]
+    cursor = targets_col.aggregate(pipeline)
+    results = await cursor.to_list(length=None)
+    
     stats = {"دعم": 0, "تقديم": 0, "ورن": 0}
-    for row in c.fetchall(): stats[row[0]] = row[1]
+    for row in results:
+        stats[row["_id"]] = row["count"]
+        
     total = sum(stats.values())
     
     embed = discord.Embed(title="📊 إحصائيات التارجت الأسبوعي", color=EMBED_COLOR)
