@@ -368,9 +368,10 @@ async def removeowner(ctx, user: discord.Member):
 
 @bot.hybrid_command(name="setroom", description="تحديد روم رفع التارجت لإداري معين")
 @is_bot_owner()
-async def setroom(ctx, member: discord.Member, channel: discord.TextChannel):
-    await rooms_col.update_one({"user_id": member.id}, {"$set": {"channel_id": channel.id}}, upsert=True)
-    await ctx.send(embed=discord.Embed(description=f"✅ تم تخصيص الروم {channel.mention} للإداري {member.mention}.", color=0x2ecc71))
+async def setroom(ctx, member: discord.Member, channel: discord.TextChannel = None):
+    target_channel = channel or ctx.channel
+    await rooms_col.update_one({"user_id": member.id}, {"$set": {"channel_id": target_channel.id}}, upsert=True)
+    await ctx.send(embed=discord.Embed(description=f"✅ تم تخصيص الروم {target_channel.mention} للإداري {member.mention}.", color=0x2ecc71))
 
 @bot.hybrid_command(name="unsetroom", description="مسح روم التارجت المخصصة لإداري")
 @is_bot_owner()
